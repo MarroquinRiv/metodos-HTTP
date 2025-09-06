@@ -4,6 +4,40 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
+// Middleware para permitir solo peticiones desde 127.0.0.1 o desde un puerto específico
+// Si la petición viene de otra IP, responde con error 403 Forbidden
+const permitirSoloLocalhostOPuerto = (req, res, next) => {
+    // Obtener la IP remota (puede venir como ::1 en IPv6 para localhost)
+    const ip = req.ip || req.connection.remoteAddress;
+    // Obtener el puerto remoto
+    const remotePort = req.connection.remotePort;
+    // Permitir solo si la IP es localhost o el puerto es 3001
+    if (ip === '127.0.0.1' || ip === '::1' || remotePort === 3001) {
+        return next();
+    }
+    return res.status(403).json({ error: 'Acceso solo permitido desde 127.0.0.1 o puerto 3001' });
+};
+
+// Usar el middleware antes de las rutas protegidas
+app.use(permitirSoloLocalhostOPuerto);
+
+// Middleware para validar la existencia y validez de x-api-key en los headers
+// Si la clave no está o es incorrecta, devuelve un error JSON
+const validarApiKey = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'];
+    const CLAVE_CORRECTA = '12345'; // Cambiar la clave según necesidad
+    if (!apiKey) {
+        return res.status(401).json({ error: 'Falta la clave x-api-key en los headers' });
+    }
+    if (apiKey !== CLAVE_CORRECTA) {
+        return res.status(403).json({ error: 'Clave x-api-key incorrecta' });
+    }
+    next();
+};
+
+// Usar el middleware de validación de API Key en todas las rutas
+app.use(validarApiKey);
+
 // crear un array de tareas de ejemplo:
 const tareas = [
     { id: 1, titulo: 'Tarea 1', completada: false },
@@ -39,19 +73,61 @@ const validarId = (req, res, next) => {
     next();
 };
 
-//Crear middleware logger que imprima metodo URL y timestamp
+//Crear middleware logger que imprima metodo, URL y fecha/hora
+// Ejemplo: POST /tareas - 2025-08-29 21:15:33
 const logger = (req, res, next) => {
     const { method, url } = req;
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${method} ${url}`);
+    const now = new Date();
+    // Formatear fecha/hora como YYYY-MM-DD HH:mm:ss
+    const fechaHora = now.toISOString().replace('T', ' ').substring(0, 19);
+    console.log(`${method} ${url} - ${fechaHora}`);
     next();
 };
 
 app.use(logger);
 
+// Middleware para limitar a 5 peticiones por minuto desde la misma IP
+// Si se excede, devuelve { "error": "Demasiadas peticiones, intente más tarde" }
+const rateLimitMap = new Map();
+
+const rateLimiter = (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    const windowMs = 60 * 1000; // 1 minuto
+    const maxRequests = 5;
+
+    if (!rateLimitMap.has(ip)) {
+        rateLimitMap.set(ip, []);
+    }
+    const timestamps = rateLimitMap.get(ip);
+
+    // Eliminar timestamps fuera de la ventana de 1 minuto
+    while (timestamps.length && (now - timestamps[0]) > windowMs) {
+        timestamps.shift();
+    }
+
+    if (timestamps.length >= maxRequests) {
+        return res.status(429).json({ error: 'Demasiadas peticiones, intente más tarde' });
+    }
+
+    timestamps.push(now);
+    next();
+};
+
+// Usar el middleware de rate limiting en todas las rutas
+app.use(rateLimiter);
+
 //Crear ruta POST /tareas que reciba del body y agregue al arreglo
 app.post('/tareas', (req, res) => {
     const nuevaTarea = req.body;
+    // Validar que el título tenga al menos 5 caracteres
+    if (!nuevaTarea.titulo || nuevaTarea.titulo.length < 5) {
+        return res.status(400).json({ error: 'El titulo debe tener al menos 5 caracteres' });
+    }
+    // Convertir el título a minúsculas y eliminar espacios extras antes de guardar
+    // Ejemplo: " Estudiar Node " -> "estudiar node"
+    nuevaTarea.titulo = nuevaTarea.titulo.trim().toLowerCase().replace(/\s+/g, ' ');
+
     // Verificar si ya existe una tarea con el mismo título
     const existe = tareas.some(t => t.titulo === nuevaTarea.titulo);
     if (existe) {
@@ -104,6 +180,15 @@ app.delete('/tareas/:id', validarId, (req, res) => {
     }
     tareas.splice(index, 1);
     res.status(204).send(); // Responder con un 204 No Content
+});
+
+// Middleware para bloquear cualquier petición PATCH u OPTIONS
+// Responde con { "error": "Método no permitido" }
+app.use((req, res, next) => {
+    if (req.method === 'PATCH' || req.method === 'OPTIONS') {
+        return res.status(405).json({ error: 'Método no permitido' });
+    }
+    next();
 });
 
 const PORT = 3000;
